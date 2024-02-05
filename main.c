@@ -5,12 +5,57 @@
 
 #define VENDOR_ID 0x1782
 #define PRODUCT_ID 0x4d00
+#define TIMEOUT 1000
 
 typedef struct {
     libusb_device_handle *handle;
-    struct libusb_endpoint_descriptor *ep_in;
-    struct libusb_endpoint_descriptor *ep_out;
+    int ep_in;
+    int ep_out;
 } SprdContext;
+
+static int sprd_send(SprdContext *sprd_context, const uint8_t *data, int length) {
+    int transferred;
+    int ret = libusb_bulk_transfer(
+            sprd_context->handle,
+            sprd_context->ep_out,
+            (unsigned char *) data,
+            length,
+            &transferred,
+            TIMEOUT
+    );
+    if (ret) {
+        printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
+        return ret;
+    }
+    // TODO: Do a loop in case not everything was transferred
+    if (transferred != length) {
+        printf("libusb_bulk_transfer transferred %d instead of %d\n", transferred, length);
+        return -1;
+    }
+    return 0;
+}
+
+static int sprd_receive(SprdContext *sprd_context, uint8_t *data, int length) {
+    int transferred;
+    int ret = libusb_bulk_transfer(
+            sprd_context->handle,
+            sprd_context->ep_in,
+            (unsigned char *) data,
+            length,
+            &transferred,
+            TIMEOUT
+    );
+    if (ret) {
+        printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
+        return ret;
+    }
+    // TODO: Do a loop in case not everything was transferred
+    if (transferred != length) {
+        printf("libusb_bulk_transfer transferred %d instead of %d\n", transferred, length);
+        return -1;
+    }
+    return 0;
+}
 
 static int sprd_do_work(SprdContext *sprd_context) {
     // TODO: Do stuff now that we have the endpoints
@@ -89,16 +134,19 @@ int main() {
         goto exit;
     }
 
+    sprd_context.ep_in = -1;
+    sprd_context.ep_out = -1;
+
     for (uint8_t i = 0; i < config->interface->altsetting->bNumEndpoints; i++) {
         const struct libusb_endpoint_descriptor *endpoint = &config->interface->altsetting->endpoint[i];
         if (endpoint->bEndpointAddress == 0x85) {
-            sprd_context.ep_in = (struct libusb_endpoint_descriptor *)endpoint;
+            sprd_context.ep_in = endpoint->bEndpointAddress;
         } else if (endpoint->bEndpointAddress == 0x06) {
-            sprd_context.ep_out = (struct libusb_endpoint_descriptor *)endpoint;
+            sprd_context.ep_out = endpoint->bEndpointAddress;
         }
     }
 
-    if (sprd_context.ep_in == NULL || sprd_context.ep_out == NULL) {
+    if (sprd_context.ep_in == -1 || sprd_context.ep_out == -1) {
         printf("Endpoints not found\n");
         ret = LIBUSB_ERROR_NO_DEVICE;
         goto exit;
