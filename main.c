@@ -59,7 +59,8 @@ int main() {
 
     if (desc.bNumConfigurations != 1) {
         printf("Unexpected number of configurations: %d\n", desc.bNumConfigurations);
-        return -1;
+        ret = LIBUSB_ERROR_NO_DEVICE;
+        goto exit;
     }
 
     ret = libusb_get_config_descriptor(libusb_get_device(sprd_context.handle), 0, &config);
@@ -72,16 +73,19 @@ int main() {
 
     if (config->bNumInterfaces != 1) {
         printf("Unexpected number of interfaces: %d\n", config->bNumInterfaces);
+        ret = LIBUSB_ERROR_NO_DEVICE;
         goto exit;
     }
 
     if (config->interface->num_altsetting != 1) {
         printf("Unexpected number of alternate settings: %d\n", config->interface->num_altsetting);
+        ret = LIBUSB_ERROR_NO_DEVICE;
         goto exit;
     }
 
     if (config->interface->altsetting->bNumEndpoints != 2) {
         printf("Unexpected number of endpoints: %d\n", config->interface->altsetting->bNumEndpoints);
+        ret = LIBUSB_ERROR_NO_DEVICE;
         goto exit;
     }
 
