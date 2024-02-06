@@ -249,6 +249,7 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
 static int sprd_do_work(SprdContext *sprd_context) {
     int ret;
 
+    printf("Sending USB hello...\n");
     ret = sprd_send_usb_hello(sprd_context);
     if (ret) {
         printf("sprd_send_usb_init failed: %s\n", libusb_error_name(ret));
@@ -260,9 +261,9 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return -1;
     }
 
-    printf("Received BSL_REP_VER\n");
+    printf("Received BSL_REP_VER: %.*s\n", sprd_get_frame_data_size(sprd_context), sprd_get_frame_data(sprd_context));
 
-    printf("VER: %.*s\n", sprd_get_frame_data_size(sprd_context), sprd_get_frame_data(sprd_context));
+    // TODO: Everything's set up, now we can start real work!
 
     return 0;
 }
