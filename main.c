@@ -75,7 +75,8 @@ static int sprd_send(SprdContext *sprd_context) {
     uint8_t buffer[FRAME_MAX_SIZE];
     int buffer_length = 0;
 
-    for (int i = 1; i < sprd_context->buffer_length - 1; i++) {
+    buffer[buffer_length++] = HDLC_FLAG;
+    for (int i = 0; i < sprd_context->buffer_length; i++) {
         if (buffer_length >= FRAME_MAX_SIZE) {
             printf("Payload too long\n");
             return -1;
@@ -88,6 +89,7 @@ static int sprd_send(SprdContext *sprd_context) {
             buffer[buffer_length++] = sprd_context->buffer[i];
         }
     }
+    buffer[buffer_length++] = HDLC_FLAG;
 
     int transferred_total = 0;
     do {
@@ -140,14 +142,12 @@ static int sprd_receive(SprdContext *sprd_context) {
             if (packet_state == PACKET_STATE_START) {
                 if (buffer[i] == HDLC_FLAG) {
                     packet_state = PACKET_STATE_UNESCAPED;
-                    sprd_context->buffer[received++] = buffer[i];
                 }
             } else if (packet_state == PACKET_STATE_ESCAPED) {
                 sprd_context->buffer[received++] = buffer[i] ^ HDLC_ESCAPE_MASK;
             } else {
                 if (buffer[i] == HDLC_FLAG) {
                     packet_state = PACKET_STATE_END;
-                    sprd_context->buffer[received++] = buffer[i];
                     break;
                 } else if (buffer[i] == HDLC_ESCAPE) {
                     packet_state = PACKET_STATE_ESCAPED;
@@ -160,8 +160,8 @@ static int sprd_receive(SprdContext *sprd_context) {
 
     sprd_context->buffer_length = received;
 
-    uint16_t crc = crc_16_l_calc(sprd_context->buffer + 1, received - 1 - FRAME_CRC_SIZE - 1);
-    uint16_t received_crc = (sprd_context->buffer[received - 3] << 8) | sprd_context->buffer[received - 2];
+    uint16_t crc = crc_16_l_calc(sprd_context->buffer, received - FRAME_CRC_SIZE);
+    uint16_t received_crc = (sprd_context->buffer[received - 2] << 8) | sprd_context->buffer[received - 1];
     if (crc != received_crc) {
         printf("CRC mismatch (0x%04x != 0x%04x)\n", crc, received_crc);
         return -1;
@@ -176,31 +176,29 @@ static int sprd_send_frame(SprdContext *sprd_context, uint16_t type, uint16_t da
         return -1;
     }
 
-    sprd_context->buffer[0] = HDLC_FLAG;
-    sprd_context->buffer[1] = (type >> 8) & 0xff;
-    sprd_context->buffer[2] = type & 0xff;
-    sprd_context->buffer[3] = (data_size >> 8) & 0xff;
-    sprd_context->buffer[4] = data_size & 0xff;
-    memcpy(sprd_context->buffer + 5, data, data_size);
-    uint16_t crc = crc_16_l_calc(sprd_context->buffer + 1, FRAME_HEADER_SIZE + data_size);
-    sprd_context->buffer[5 + data_size] = (crc >> 8) & 0xff;
-    sprd_context->buffer[6 + data_size] = crc & 0xff;
-    sprd_context->buffer[7 + data_size] = HDLC_FLAG;
-    sprd_context->buffer_length = 1 + FRAME_HEADER_SIZE + data_size + FRAME_CRC_SIZE + 1;
+    sprd_context->buffer[0] = (type >> 8) & 0xff;
+    sprd_context->buffer[1] = type & 0xff;
+    sprd_context->buffer[2] = (data_size >> 8) & 0xff;
+    sprd_context->buffer[3] = data_size & 0xff;
+    memcpy(sprd_context->buffer + 4, data, data_size);
+    uint16_t crc = crc_16_l_calc(sprd_context->buffer, FRAME_HEADER_SIZE + data_size);
+    sprd_context->buffer[4 + data_size] = (crc >> 8) & 0xff;
+    sprd_context->buffer[5 + data_size] = crc & 0xff;
+    sprd_context->buffer_length = FRAME_HEADER_SIZE + data_size + FRAME_CRC_SIZE;
 
     return sprd_send(sprd_context);
 }
 
 static inline uint16_t sprd_get_frame_type(SprdContext *sprd_context) {
-    return (sprd_context->buffer[1] << 8) | sprd_context->buffer[2];
+    return (sprd_context->buffer[0] << 8) | sprd_context->buffer[1];
 }
 
 static inline uint16_t sprd_get_frame_data_size(SprdContext *sprd_context) {
-    return (sprd_context->buffer[3] << 8) | sprd_context->buffer[4];
+    return (sprd_context->buffer[2] << 8) | sprd_context->buffer[3];
 }
 
 static inline uint8_t *sprd_get_frame_data(SprdContext *sprd_context) {
-    return sprd_context->buffer + 5;
+    return sprd_context->buffer + 4;
 }
 
 static int sprd_send_usb_hello(SprdContext *sprd_context) {
