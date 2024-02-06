@@ -8,7 +8,7 @@
 #define PRODUCT_ID 0x4d00
 #define EP_IN 0x85
 #define EP_OUT 0x06
-#define TIMEOUT 0
+#define TIMEOUT_MS 5000
 
 #define FRAME_HEADER_SIZE 4
 #define FRAME_MAX_DATA_SIZE 4096
@@ -98,7 +98,7 @@ static int sprd_send(SprdContext *sprd_context) {
                 buffer + transferred_total,
                 buffer_length - transferred_total,
                 &transferred,
-                TIMEOUT
+                TIMEOUT_MS
         );
         if (ret) {
             printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
@@ -124,7 +124,7 @@ static int sprd_receive(SprdContext *sprd_context) {
                 buffer,
                 FRAME_MAX_SIZE - received,
                 &transferred,
-                TIMEOUT
+                TIMEOUT_MS
         );
         if (ret) {
             printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
@@ -215,7 +215,7 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
             0, // wIndex: Don't care
             NULL, // data: Don't care
             0, // wLength: Don't care
-            TIMEOUT
+            TIMEOUT_MS
     );
     if (ret) {
         printf("libusb_control_transfer failed: %s\n", libusb_error_name(ret));
@@ -230,17 +230,49 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
             &data,
             1,
             NULL,
-            TIMEOUT
+            TIMEOUT_MS
     );
     if (ret) {
         printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
         return ret;
     }
 
-    // Get response (should be BSL_REP_VER)
+    // Get response
     ret = sprd_receive(sprd_context);
     if (ret) {
         printf("sprd_receive failed: %d\n", ret);
+    }
+
+    // BSL_REP_VER
+    if (sprd_get_frame_type(sprd_context) != 0x81) {
+        printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
+        return -1;
+    }
+
+    return 0;
+}
+
+static int sprd_check_connection(SprdContext *sprd_context) {
+    int ret;
+
+    // Send BSL_CMD_CONNECT
+    ret = sprd_send_frame(sprd_context, 0x00, 0, NULL);
+    if (ret) {
+        printf("sprd_send_frame failed: %d\n", ret);
+        return ret;
+    }
+
+    // Get response
+    ret = sprd_receive(sprd_context);
+    if (ret) {
+        printf("sprd_receive failed: %d\n", ret);
+        return ret;
+    }
+
+    // BSL_REP_CONNECT
+    if (sprd_get_frame_type(sprd_context) != 0x80) {
+        printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
+        return -1;
     }
 
     return 0;
@@ -256,12 +288,13 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    if (sprd_get_frame_type(sprd_context) != 0x81) {
-        printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
-        return -1;
-    }
-
     printf("Received BSL_REP_VER: %.*s\n", sprd_get_frame_data_size(sprd_context), sprd_get_frame_data(sprd_context));
+
+    ret = sprd_check_connection(sprd_context);
+    if (ret) {
+        printf("sprd_check_connection failed: %d\n", ret);
+        return ret;
+    }
 
     // TODO: Everything's set up, now we can start real work!
 
