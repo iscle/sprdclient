@@ -255,8 +255,14 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    uint16_t type = (sprd_context->buffer[1] << 8) | sprd_context->buffer[2];
-    printf("Received type: 0x%04x\n", type);
+    if (sprd_get_frame_type(sprd_context) != 0x81) {
+        printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
+        return -1;
+    }
+
+    printf("Received BSL_REP_VER\n");
+
+    printf("VER: %.*s\n", sprd_get_frame_data_size(sprd_context), sprd_get_frame_data(sprd_context));
 
     return 0;
 }
