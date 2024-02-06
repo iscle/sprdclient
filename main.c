@@ -191,15 +191,15 @@ static int sprd_send_frame(SprdContext *sprd_context, uint16_t type, uint16_t da
     return sprd_send(sprd_context);
 }
 
-static uint16_t sprd_get_frame_type(SprdContext *sprd_context) {
+static inline uint16_t sprd_get_frame_type(SprdContext *sprd_context) {
     return (sprd_context->buffer[1] << 8) | sprd_context->buffer[2];
 }
 
-static uint16_t sprd_get_frame_data_size(SprdContext *sprd_context) {
+static inline uint16_t sprd_get_frame_data_size(SprdContext *sprd_context) {
     return (sprd_context->buffer[3] << 8) | sprd_context->buffer[4];
 }
 
-static uint8_t *sprd_get_frame_data(SprdContext *sprd_context) {
+static inline uint8_t *sprd_get_frame_data(SprdContext *sprd_context) {
     return sprd_context->buffer + 5;
 }
 
@@ -268,41 +268,13 @@ static int sprd_do_work(SprdContext *sprd_context) {
     return 0;
 }
 
-int main() {
+static int check_endpoints(SprdContext *sprd_context) {
     int ret;
-    SprdContext sprd_context = {0};
     struct libusb_device_descriptor desc = {};
     struct libusb_config_descriptor *config = NULL;
-    bool is_open = false;
     bool has_config_descriptor = false;
-    bool interface_claimed = false;
 
-    printf("sprdclient v1.0 by iscle\n");
-
-    ret = libusb_init(NULL);
-    if (ret) {
-        printf("libusb_init failed: %s\n", libusb_error_name(ret));
-        goto exit;
-    }
-
-    printf("Waiting for connection...");
-    fflush(stdout);
-
-    do {
-        sprd_context.handle = libusb_open_device_with_vid_pid(NULL, VENDOR_ID, PRODUCT_ID);
-        if (sprd_context.handle) {
-            printf("\n");
-            break;
-        }
-        printf(".");
-        fflush(stdout);
-        sleep(1);
-    } while (1);
-
-    printf("Connected\n");
-    is_open = true;
-
-    ret = libusb_get_device_descriptor(libusb_get_device(sprd_context.handle), &desc);
+    ret = libusb_get_device_descriptor(libusb_get_device(sprd_context->handle), &desc);
     if (ret) {
         printf("libusb_get_device_descriptor failed: %s\n", libusb_error_name(ret));
         goto exit;
@@ -314,7 +286,7 @@ int main() {
         goto exit;
     }
 
-    ret = libusb_get_config_descriptor(libusb_get_device(sprd_context.handle), 0, &config);
+    ret = libusb_get_config_descriptor(libusb_get_device(sprd_context->handle), 0, &config);
     if (ret) {
         printf("libusb_get_config_descriptor failed: %s\n", libusb_error_name(ret));
         goto exit;
@@ -358,6 +330,53 @@ int main() {
         goto exit;
     }
 
+exit:
+    if (has_config_descriptor) {
+        libusb_free_config_descriptor(config);
+        config = NULL;
+        has_config_descriptor = false;
+    }
+
+    return ret;
+}
+
+int main() {
+    int ret;
+    SprdContext sprd_context = {0};
+    bool is_open = false;
+    bool interface_claimed = false;
+
+    printf("sprdclient v1.0 by iscle\n");
+
+    ret = libusb_init(NULL);
+    if (ret) {
+        printf("libusb_init failed: %s\n", libusb_error_name(ret));
+        goto exit;
+    }
+
+    printf("Waiting for connection...");
+    fflush(stdout);
+
+    do {
+        sprd_context.handle = libusb_open_device_with_vid_pid(NULL, VENDOR_ID, PRODUCT_ID);
+        if (sprd_context.handle) {
+            printf("\n");
+            break;
+        }
+        printf(".");
+        fflush(stdout);
+        sleep(1);
+    } while (1);
+
+    printf("Connected\n");
+    is_open = true;
+
+    ret = check_endpoints(&sprd_context);
+    if (ret) {
+        ret = LIBUSB_ERROR_NO_DEVICE;
+        goto exit;
+    }
+
     printf("Endpoints found, claiming interface...\n");
 
     ret = libusb_claim_interface(sprd_context.handle, 0);
@@ -375,11 +394,6 @@ exit:
     if (interface_claimed) {
         libusb_release_interface(sprd_context.handle, 0);
         interface_claimed = false;
-    }
-    if (has_config_descriptor) {
-        libusb_free_config_descriptor(config);
-        config = NULL;
-        has_config_descriptor = false;
     }
     if (is_open) {
         libusb_close(sprd_context.handle);
