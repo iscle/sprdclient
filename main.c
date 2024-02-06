@@ -2,63 +2,262 @@
 #include <libusb-1.0/libusb.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define VENDOR_ID 0x1782
 #define PRODUCT_ID 0x4d00
-#define TIMEOUT 1000
+#define EP_IN 0x85
+#define EP_OUT 0x06
+#define TIMEOUT 0
+
+#define FRAME_HEADER_SIZE 4
+#define FRAME_MAX_DATA_SIZE 4096
+#define FRAME_CRC_SIZE 2
+#define FRAME_MAX_SIZE (1 + FRAME_HEADER_SIZE + FRAME_MAX_DATA_SIZE + FRAME_CRC_SIZE + 1)
+
+#define HDLC_FLAG 0x7e
+#define HDLC_ESCAPE 0x7d
+#define HDLC_ESCAPE_MASK 0x20
+#define HDLC_FRAME_MIN_SIZE 8
+
+/*
+ * HDLC frame format:
+ *
+ * HDLC_FLAG (1 byte)
+ * Type (2 bytes)
+ * Length (2 bytes)
+ * Data (Length bytes)
+ * CRC (2 bytes)
+ * HDLC_FLAG (1 byte)
+ *
+ */
+
+enum packet_state {
+    PACKET_STATE_START,
+    PACKET_STATE_UNESCAPED,
+    PACKET_STATE_ESCAPED,
+    PACKET_STATE_END,
+};
 
 typedef struct {
     libusb_device_handle *handle;
-    int ep_in;
-    int ep_out;
+    uint8_t buffer[FRAME_MAX_SIZE];
+    int buffer_length;
 } SprdContext;
 
-static int sprd_send(SprdContext *sprd_context, const uint8_t *data, int length) {
-    int transferred;
-    int ret = libusb_bulk_transfer(
-            sprd_context->handle,
-            sprd_context->ep_out,
-            (unsigned char *) data,
-            length,
-            &transferred,
-            TIMEOUT
-    );
-    if (ret) {
-        printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
-        return ret;
+#define CRC_16_L_SEED           0x80
+#define CRC_16_L_POLYNOMIAL     0x8000
+#define CRC_16_POLYNOMIAL       0x1021
+static uint16_t crc_16_l_calc(const uint8_t *buf, size_t len) {
+    uint16_t crc = 0;
+
+    while (len-- != 0) {
+        for (uint8_t i = CRC_16_L_SEED; i != 0 ; i >>= 1) {
+            if ((crc & CRC_16_L_POLYNOMIAL) != 0) {
+                crc <<= 1;
+                crc ^= CRC_16_POLYNOMIAL;
+            } else {
+                crc <<= 1;
+            }
+
+            if ((*buf & i) != 0) {
+                crc ^= CRC_16_POLYNOMIAL;
+            }
+        }
+
+        buf++;
     }
-    // TODO: Do a loop in case not everything was transferred
-    if (transferred != length) {
-        printf("libusb_bulk_transfer transferred %d instead of %d\n", transferred, length);
-        return -1;
+
+    return crc;
+}
+
+static int sprd_send(SprdContext *sprd_context) {
+    uint8_t buffer[FRAME_MAX_SIZE];
+    int buffer_length = 0;
+
+    for (int i = 1; i < sprd_context->buffer_length - 1; i++) {
+        if (buffer_length >= FRAME_MAX_SIZE) {
+            printf("Payload too long\n");
+            return -1;
+        }
+
+        if (sprd_context->buffer[i] == HDLC_FLAG || sprd_context->buffer[i] == HDLC_ESCAPE) {
+            buffer[buffer_length++] = HDLC_ESCAPE;
+            buffer[buffer_length++] = sprd_context->buffer[i] & ~HDLC_ESCAPE_MASK;
+        } else {
+            buffer[buffer_length++] = sprd_context->buffer[i];
+        }
     }
+
+    int transferred_total = 0;
+    do {
+        int transferred;
+        int ret = libusb_bulk_transfer(
+                sprd_context->handle,
+                EP_OUT,
+                buffer + transferred_total,
+                buffer_length - transferred_total,
+                &transferred,
+                TIMEOUT
+        );
+        if (ret) {
+            printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
+            return ret;
+        }
+
+        transferred_total += transferred;
+    } while (transferred_total < buffer_length);
+
     return 0;
 }
 
-static int sprd_receive(SprdContext *sprd_context, uint8_t *data, int length) {
-    int transferred;
-    int ret = libusb_bulk_transfer(
+static int sprd_receive(SprdContext *sprd_context) {
+    uint8_t buffer[FRAME_MAX_SIZE];
+
+    int received = 0;
+    enum packet_state packet_state = PACKET_STATE_START;
+    do {
+        int transferred;
+        int ret = libusb_bulk_transfer(
+                sprd_context->handle,
+                EP_IN,
+                buffer,
+                FRAME_MAX_SIZE - received,
+                &transferred,
+                TIMEOUT
+        );
+        if (ret) {
+            printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
+            return ret;
+        }
+
+        for (int i = 0; i < transferred; i++) {
+            if (received == FRAME_MAX_SIZE) {
+                printf("Buffer too small\n");
+                return -1;
+            }
+
+            if (packet_state == PACKET_STATE_START) {
+                if (buffer[i] == HDLC_FLAG) {
+                    packet_state = PACKET_STATE_UNESCAPED;
+                    sprd_context->buffer[received++] = buffer[i];
+                }
+            } else if (packet_state == PACKET_STATE_ESCAPED) {
+                sprd_context->buffer[received++] = buffer[i] ^ HDLC_ESCAPE_MASK;
+            } else {
+                if (buffer[i] == HDLC_FLAG) {
+                    packet_state = PACKET_STATE_END;
+                    sprd_context->buffer[received++] = buffer[i];
+                    break;
+                } else if (buffer[i] == HDLC_ESCAPE) {
+                    packet_state = PACKET_STATE_ESCAPED;
+                } else {
+                    sprd_context->buffer[received++] = buffer[i];
+                }
+            }
+        }
+    } while (packet_state != PACKET_STATE_END);
+
+    sprd_context->buffer_length = received;
+
+    uint16_t crc = crc_16_l_calc(sprd_context->buffer + 1, received - 1 - FRAME_CRC_SIZE - 1);
+    uint16_t received_crc = (sprd_context->buffer[received - 3] << 8) | sprd_context->buffer[received - 2];
+    if (crc != received_crc) {
+        printf("CRC mismatch (0x%04x != 0x%04x)\n", crc, received_crc);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int sprd_send_frame(SprdContext *sprd_context, uint16_t type, uint16_t data_size, uint8_t *data) {
+    if (data_size > FRAME_MAX_DATA_SIZE) {
+        printf("Data too long\n");
+        return -1;
+    }
+
+    sprd_context->buffer[0] = HDLC_FLAG;
+    sprd_context->buffer[1] = (type >> 8) & 0xff;
+    sprd_context->buffer[2] = type & 0xff;
+    sprd_context->buffer[3] = (data_size >> 8) & 0xff;
+    sprd_context->buffer[4] = data_size & 0xff;
+    memcpy(sprd_context->buffer + 5, data, data_size);
+    uint16_t crc = crc_16_l_calc(sprd_context->buffer + 1, FRAME_HEADER_SIZE + data_size);
+    sprd_context->buffer[5 + data_size] = (crc >> 8) & 0xff;
+    sprd_context->buffer[6 + data_size] = crc & 0xff;
+    sprd_context->buffer[7 + data_size] = HDLC_FLAG;
+    sprd_context->buffer_length = 1 + FRAME_HEADER_SIZE + data_size + FRAME_CRC_SIZE + 1;
+
+    return sprd_send(sprd_context);
+}
+
+static uint16_t sprd_get_frame_type(SprdContext *sprd_context) {
+    return (sprd_context->buffer[1] << 8) | sprd_context->buffer[2];
+}
+
+static uint16_t sprd_get_frame_data_size(SprdContext *sprd_context) {
+    return (sprd_context->buffer[3] << 8) | sprd_context->buffer[4];
+}
+
+static uint8_t *sprd_get_frame_data(SprdContext *sprd_context) {
+    return sprd_context->buffer + 5;
+}
+
+static int sprd_send_usb_hello(SprdContext *sprd_context) {
+    int ret;
+
+    // Trigger USB endpoint configuration
+    ret = libusb_control_transfer(
             sprd_context->handle,
-            sprd_context->ep_in,
-            (unsigned char *) data,
-            length,
-            &transferred,
+            0x21, // bmRequestType: Host to device, class, interface
+            0, // bRequest: Don't care
+            1, // wValue: Bit 0 set
+            0, // wIndex: Don't care
+            NULL, // data: Don't care
+            0, // wLength: Don't care
+            TIMEOUT
+    );
+    if (ret) {
+        printf("libusb_control_transfer failed: %s\n", libusb_error_name(ret));
+        return ret;
+    }
+
+    // Send HDLC_FLAG as a hello
+    uint8_t data = HDLC_FLAG;
+    ret = libusb_bulk_transfer(
+            sprd_context->handle,
+            EP_OUT,
+            &data,
+            1,
+            NULL,
             TIMEOUT
     );
     if (ret) {
         printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
         return ret;
     }
-    // TODO: Do a loop in case not everything was transferred
-    if (transferred != length) {
-        printf("libusb_bulk_transfer transferred %d instead of %d\n", transferred, length);
-        return -1;
+
+    // Get response (should be BSL_REP_VER)
+    ret = sprd_receive(sprd_context);
+    if (ret) {
+        printf("sprd_receive failed: %d\n", ret);
     }
+
     return 0;
 }
 
 static int sprd_do_work(SprdContext *sprd_context) {
-    // TODO: Do stuff now that we have the endpoints
+    int ret;
+
+    ret = sprd_send_usb_hello(sprd_context);
+    if (ret) {
+        printf("sprd_send_usb_init failed: %s\n", libusb_error_name(ret));
+        return ret;
+    }
+
+    uint16_t type = (sprd_context->buffer[1] << 8) | sprd_context->buffer[2];
+    printf("Received type: 0x%04x\n", type);
+
     return 0;
 }
 
@@ -134,19 +333,19 @@ int main() {
         goto exit;
     }
 
-    sprd_context.ep_in = -1;
-    sprd_context.ep_out = -1;
+    bool found_in = false;
+    bool found_out = false;
 
     for (uint8_t i = 0; i < config->interface->altsetting->bNumEndpoints; i++) {
         const struct libusb_endpoint_descriptor *endpoint = &config->interface->altsetting->endpoint[i];
         if (endpoint->bEndpointAddress == 0x85) {
-            sprd_context.ep_in = endpoint->bEndpointAddress;
+            found_in = true;
         } else if (endpoint->bEndpointAddress == 0x06) {
-            sprd_context.ep_out = endpoint->bEndpointAddress;
+            found_out = true;
         }
     }
 
-    if (sprd_context.ep_in == -1 || sprd_context.ep_out == -1) {
+    if (!found_in || !found_out) {
         printf("Endpoints not found\n");
         ret = LIBUSB_ERROR_NO_DEVICE;
         goto exit;
