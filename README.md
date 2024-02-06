@@ -1,7 +1,5 @@
 # sprdclient
 
----
-
 sprdclient aims to be a simple and easy to use tool to interact with Spreadtrum / Unisoc BootROM and FDLs.
 
 ## Goals
