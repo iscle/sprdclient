@@ -237,13 +237,11 @@ static int sprd_send_and_check_frame(SprdContext *sprd_context, uint16_t type, u
 
     ret = sprd_send_frame(sprd_context, type, data_size, data);
     if (ret) {
-        printf("sprd_send_frame failed: %d\n", ret);
         return ret;
     }
 
     ret = sprd_receive(sprd_context);
     if (ret) {
-        printf("sprd_receive failed: %d\n", ret);
         return ret;
     }
 
@@ -292,7 +290,7 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
     // Get response
     ret = sprd_receive(sprd_context);
     if (ret) {
-        printf("sprd_receive failed: %d\n", ret);
+        // TODO: Do something about it?
     }
 
     // BSL_REP_VER
@@ -305,15 +303,7 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
 }
 
 static int sprd_check_connection(SprdContext *sprd_context) {
-    int ret;
-
-    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_CONNECT, 0, NULL);
-    if (ret) {
-        printf("sprd_send_and_check_frame failed: %d\n", ret);
-        return ret;
-    }
-
-    return 0;
+    return sprd_send_and_check_frame(sprd_context, BSL_CMD_CONNECT, 0, NULL);
 }
 
 /*
