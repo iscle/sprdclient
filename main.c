@@ -3,17 +3,29 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 
 #define VENDOR_ID 0x1782
 #define PRODUCT_ID 0x4d00
 #define EP_IN 0x85
 #define EP_OUT 0x06
-#define TIMEOUT_MS 5000
+#define TIMEOUT_MS 1000
 
 #define FRAME_HEADER_SIZE 4
 #define FRAME_MAX_DATA_SIZE 4096
 #define FRAME_CRC_SIZE 2
 #define FRAME_MAX_SIZE (1 + FRAME_HEADER_SIZE + FRAME_MAX_DATA_SIZE + FRAME_CRC_SIZE + 1)
+
+#define BSL_CMD_CONNECT 0x00
+#define BSL_CMD_START_DATA 0x01
+#define BSL_CMD_MIDST_DATA 0x02
+#define BSL_CMD_END_DATA 0x03
+#define BSL_CMD_EXEC_DATA 0x04
+
+#define BSL_REP_ACK 0x80
+#define BSL_REP_VER 0x81
 
 #define HDLC_FLAG 0x7e
 #define HDLC_ESCAPE 0x7d
@@ -41,14 +53,27 @@ enum packet_state {
 
 typedef struct {
     libusb_device_handle *handle;
+    uint16_t (*crc)(const uint8_t *buf, size_t len);
     uint8_t buffer[FRAME_MAX_SIZE];
     int buffer_length;
 } SprdContext;
 
-#define CRC_16_L_SEED           0x80
-#define CRC_16_L_POLYNOMIAL     0x8000
-#define CRC_16_POLYNOMIAL       0x1021
-static uint16_t crc_16_l_calc(const uint8_t *buf, size_t len) {
+static inline uint16_t sprd_get_frame_type(SprdContext *sprd_context) {
+    return (sprd_context->buffer[0] << 8) | sprd_context->buffer[1];
+}
+
+static inline uint16_t sprd_get_frame_data_size(SprdContext *sprd_context) {
+    return (sprd_context->buffer[2] << 8) | sprd_context->buffer[3];
+}
+
+static inline uint8_t *sprd_get_frame_data(SprdContext *sprd_context) {
+    return sprd_context->buffer + 4;
+}
+
+#define CRC_16_L_SEED       0x80
+#define CRC_16_L_POLYNOMIAL 0x8000
+#define CRC_16_POLYNOMIAL   0x1021
+static uint16_t sprd_brom_crc(const uint8_t *buf, size_t len) {
     uint16_t crc = 0;
 
     while (len-- != 0) {
@@ -71,6 +96,24 @@ static uint16_t crc_16_l_calc(const uint8_t *buf, size_t len) {
     return crc;
 }
 
+static uint16_t sprd_fdl_crc(const uint8_t *buf, size_t len) {
+    uint32_t crc = 0;
+    size_t i;
+
+    for (i = 0; len - i > 1; i += 2) {
+        crc += buf[i] << 8 | buf[i + 1];
+    }
+
+    if (i != len) {
+        crc += buf[i];
+    }
+
+    crc = (crc >> 16) + (crc & 0x0FFFF);
+    crc += (crc >> 16);
+
+    return ~crc;
+}
+
 static int sprd_send(SprdContext *sprd_context) {
     uint8_t buffer[FRAME_MAX_SIZE];
     int buffer_length = 0;
@@ -84,7 +127,7 @@ static int sprd_send(SprdContext *sprd_context) {
 
         if (sprd_context->buffer[i] == HDLC_FLAG || sprd_context->buffer[i] == HDLC_ESCAPE) {
             buffer[buffer_length++] = HDLC_ESCAPE;
-            buffer[buffer_length++] = sprd_context->buffer[i] & ~HDLC_ESCAPE_MASK;
+            buffer[buffer_length++] = sprd_context->buffer[i] ^ HDLC_ESCAPE_MASK;
         } else {
             buffer[buffer_length++] = sprd_context->buffer[i];
         }
@@ -160,7 +203,7 @@ static int sprd_receive(SprdContext *sprd_context) {
 
     sprd_context->buffer_length = received;
 
-    uint16_t crc = crc_16_l_calc(sprd_context->buffer, received - FRAME_CRC_SIZE);
+    uint16_t crc = sprd_context->crc(sprd_context->buffer, received - FRAME_CRC_SIZE);
     uint16_t received_crc = (sprd_context->buffer[received - 2] << 8) | sprd_context->buffer[received - 1];
     if (crc != received_crc) {
         printf("CRC mismatch (0x%04x != 0x%04x)\n", crc, received_crc);
@@ -181,7 +224,7 @@ static int sprd_send_frame(SprdContext *sprd_context, uint16_t type, uint16_t da
     sprd_context->buffer[2] = (data_size >> 8) & 0xff;
     sprd_context->buffer[3] = data_size & 0xff;
     memcpy(sprd_context->buffer + 4, data, data_size);
-    uint16_t crc = crc_16_l_calc(sprd_context->buffer, FRAME_HEADER_SIZE + data_size);
+    uint16_t crc = sprd_context->crc(sprd_context->buffer, FRAME_HEADER_SIZE + data_size);
     sprd_context->buffer[4 + data_size] = (crc >> 8) & 0xff;
     sprd_context->buffer[5 + data_size] = crc & 0xff;
     sprd_context->buffer_length = FRAME_HEADER_SIZE + data_size + FRAME_CRC_SIZE;
@@ -189,16 +232,27 @@ static int sprd_send_frame(SprdContext *sprd_context, uint16_t type, uint16_t da
     return sprd_send(sprd_context);
 }
 
-static inline uint16_t sprd_get_frame_type(SprdContext *sprd_context) {
-    return (sprd_context->buffer[0] << 8) | sprd_context->buffer[1];
-}
+static int sprd_send_and_check_frame(SprdContext *sprd_context, uint16_t type, uint16_t data_size, uint8_t *data) {
+    int ret;
 
-static inline uint16_t sprd_get_frame_data_size(SprdContext *sprd_context) {
-    return (sprd_context->buffer[2] << 8) | sprd_context->buffer[3];
-}
+    ret = sprd_send_frame(sprd_context, type, data_size, data);
+    if (ret) {
+        printf("sprd_send_frame failed: %d\n", ret);
+        return ret;
+    }
 
-static inline uint8_t *sprd_get_frame_data(SprdContext *sprd_context) {
-    return sprd_context->buffer + 4;
+    ret = sprd_receive(sprd_context);
+    if (ret) {
+        printf("sprd_receive failed: %d\n", ret);
+        return ret;
+    }
+
+    if (sprd_get_frame_type(sprd_context) != BSL_REP_ACK) {
+        printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
+        return -1;
+    }
+
+    return 0;
 }
 
 static int sprd_send_usb_hello(SprdContext *sprd_context) {
@@ -242,7 +296,7 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
     }
 
     // BSL_REP_VER
-    if (sprd_get_frame_type(sprd_context) != 0x81) {
+    if (sprd_get_frame_type(sprd_context) != BSL_REP_VER) {
         printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
         return -1;
     }
@@ -253,31 +307,113 @@ static int sprd_send_usb_hello(SprdContext *sprd_context) {
 static int sprd_check_connection(SprdContext *sprd_context) {
     int ret;
 
-    // Send BSL_CMD_CONNECT
-    ret = sprd_send_frame(sprd_context, 0x00, 0, NULL);
+    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_CONNECT, 0, NULL);
     if (ret) {
-        printf("sprd_send_frame failed: %d\n", ret);
+        printf("sprd_send_and_check_frame failed: %d\n", ret);
         return ret;
-    }
-
-    // Get response
-    ret = sprd_receive(sprd_context);
-    if (ret) {
-        printf("sprd_receive failed: %d\n", ret);
-        return ret;
-    }
-
-    // BSL_REP_CONNECT
-    if (sprd_get_frame_type(sprd_context) != 0x80) {
-        printf("Unexpected frame type: 0x%04x\n", sprd_get_frame_type(sprd_context));
-        return -1;
     }
 
     return 0;
 }
 
+static int sprd_execute_payload(SprdContext *sprd_context, uint32_t load_address, uint8_t *payload, uint32_t payload_size) {
+    int ret;
+    uint8_t buffer[8];
+
+    printf("Sending BSL_CMD_START_DATA...\n");
+
+    // Send BSL_CMD_START_DATA
+    buffer[0] = (load_address >> 24) & 0xff;
+    buffer[1] = (load_address >> 16) & 0xff;
+    buffer[2] = (load_address >> 8) & 0xff;
+    buffer[3] = load_address & 0xff;
+    buffer[4] = (payload_size >> 24) & 0xff;
+    buffer[5] = (payload_size >> 16) & 0xff;
+    buffer[6] = (payload_size >> 8) & 0xff;
+    buffer[7] = payload_size & 0xff;
+    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_START_DATA, 8, buffer);
+    if (ret) {
+        printf("sprd_send_and_check_frame failed: %d\n", ret);
+        return ret;
+    }
+
+    printf("Sending BSL_CMD_MIDST_DATA...\n");
+
+    // Send BSL_CMD_MIDST_DATA
+    uint32_t offset = 0;
+    while (offset < payload_size) {
+        uint32_t chunk_size = payload_size - offset;
+        // Worst case, all bytes have to be escaped
+        if (chunk_size > 528) {
+            chunk_size = 528;
+        }
+        printf("Sending %d bytes...\n", chunk_size);
+        ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_MIDST_DATA, chunk_size, payload + offset);
+        if (ret) {
+            printf("sprd_send_and_check_frame failed: %d\n", ret);
+            return ret;
+        }
+        offset += chunk_size;
+    }
+
+    printf("Sending BSL_CMD_END_DATA...\n");
+
+    // Send BSL_CMD_END_DATA
+    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_END_DATA, 0, NULL);
+    if (ret) {
+        printf("sprd_send_and_check_frame failed: %d\n", ret);
+        return ret;
+    }
+
+    printf("Sending BSL_CMD_EXEC_DATA...\n");
+    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_EXEC_DATA, 0, NULL);
+    if (ret) {
+        printf("sprd_send_and_check_frame failed: %d\n", ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+static int mmap_file(const char *filename, uint8_t **fileptr, ssize_t *filesize) {
+    int fd;
+
+    fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        printf("open failed: %s\n", filename);
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        printf("fstat failed: %s\n", filename);
+        close(fd);
+        return -1;
+    }
+
+    *fileptr = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (*fileptr == MAP_FAILED) {
+        printf("mmap failed: %s\n", filename);
+        close(fd);
+        return -1;
+    }
+
+    *filesize = st.st_size;
+    return 0;
+}
+
+static int munmap_file(uint8_t *fileptr, ssize_t filesize) {
+    if (munmap(fileptr, filesize) < 0) {
+        printf("munmap failed: %p, %ld\n", fileptr, filesize);
+        return -1;
+    }
+    return 0;
+}
+
 static int sprd_do_work(SprdContext *sprd_context) {
     int ret;
+
+    sprd_context->crc = sprd_brom_crc;
 
     printf("Sending USB hello...\n");
     ret = sprd_send_usb_hello(sprd_context);
@@ -294,7 +430,53 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
+    printf("Connected to BootROM!\n");
+
     // TODO: Everything's set up, now we can start real work!
+
+    printf("Starting fdl1 execution...\n");
+
+    char *filename = "/home/iscle/Downloads/KOSPET_PRIME_S_PIX_V1.1_20210917/extracted/fdl1-sign.bin";
+    uint8_t *payload;
+    ssize_t payload_size;
+    ret = mmap_file(filename, &payload, &payload_size);
+    if (ret) {
+        printf("mmap_file failed: %d\n", ret);
+        return ret;
+    }
+
+    ret = sprd_execute_payload(sprd_context, 0x00005000, payload, payload_size);
+    if (ret) {
+        printf("sprd_execute_payload failed: %d\n", ret);
+        return ret;
+    }
+
+    ret = munmap_file(payload, payload_size);
+    if (ret) {
+        printf("munmap_file failed: %d\n", ret);
+        return ret;
+    }
+
+    sprd_context->crc = sprd_fdl_crc;
+
+    int retries = 0;
+    do {
+        printf("Sending USB hello...\n");
+        ret = sprd_send_usb_hello(sprd_context);
+        if (ret) {
+            printf("sprd_send_usb_init failed: %s\n", libusb_error_name(ret));
+            if (retries == 5) return ret;
+            retries++;
+        }
+    } while (ret);
+
+    printf("Received BSL_REP_VER: %.*s\n", sprd_get_frame_data_size(sprd_context), sprd_get_frame_data(sprd_context));
+
+    ret = sprd_check_connection(sprd_context);
+    if (ret) {
+        printf("sprd_check_connection failed: %d\n", ret);
+        return ret;
+    }
 
     return 0;
 }
