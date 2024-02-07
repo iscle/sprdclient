@@ -316,6 +316,9 @@ static int sprd_check_connection(SprdContext *sprd_context) {
     return 0;
 }
 
+/*
+ * Execute a payload using the BootROM, jumps at (load_address + 0x200)
+ */
 static int sprd_execute_payload(SprdContext *sprd_context, uint32_t load_address, uint8_t *payload, uint32_t payload_size) {
     int ret;
     uint8_t buffer[8];
