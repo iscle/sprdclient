@@ -6,10 +6,12 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include "sprd.h"
+#include "da.h"
 
 #define VENDOR_ID 0x1782
 #define PRODUCT_ID 0x4d00
-#define EP_IN 0x85
+#define EP_IN 0x85 // (0x80 | 0x05)
 #define EP_OUT 0x06
 #define TIMEOUT_MS 1000
 
@@ -175,6 +177,13 @@ static int sprd_receive(SprdContext *sprd_context) {
             printf("libusb_bulk_transfer failed: %s\n", libusb_error_name(ret));
             return ret;
         }
+
+        printf("Received %d bytes\n", transferred);
+        // print bytes as hex
+        for (int i = 0; i < transferred; i++) {
+            printf("%02x ", buffer[i]);
+        }
+        printf("\n");
 
         for (int i = 0; i < transferred; i++) {
             if (received == FRAME_MAX_SIZE) {
@@ -429,7 +438,7 @@ static int sprd_do_work(SprdContext *sprd_context) {
 
     printf("Starting fdl1 execution...\n");
 
-    char *filename = "/home/iscle/Downloads/KOSPET_PRIME_S_PIX_V1.1_20210917/extracted/fdl1-sign.bin";
+    char *filename = "/home/iscle/Documents/sprd_test/app_with_gap.bin";
     uint8_t *payload;
     ssize_t payload_size;
     ret = mmap_file(filename, &payload, &payload_size);
@@ -438,7 +447,7 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    ret = sprd_execute_payload(sprd_context, 0x00005000, payload, payload_size);
+    ret = sprd_execute_payload(sprd_context, 0x00005500, payload, payload_size);
     if (ret) {
         printf("sprd_execute_payload failed: %d\n", ret);
         return ret;
@@ -450,25 +459,25 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    sprd_context->crc = sprd_fdl_crc;
+    da_cmd_t cmd;
+    uint16_t data_length;
+    void *data;
+    if (da_receive(sprd_context->handle, &cmd, &data_length, &data)) {
+        printf("da_receive failed\n");
+        return -1;
+    }
 
-    int retries = 0;
-    do {
-        printf("Sending USB hello...\n");
-        ret = sprd_send_usb_hello(sprd_context);
-        if (ret) {
-            printf("sprd_send_usb_init failed: %s\n", libusb_error_name(ret));
-            if (retries == 5) return ret;
-            retries++;
-        }
-    } while (ret);
+    if (cmd != CMD_VERSION) {
+        printf("Unexpected command: 0x%02x\n", cmd);
+        return -1;
+    }
 
-    printf("Received BSL_REP_VER: %.*s\n", sprd_get_frame_data_size(sprd_context), sprd_get_frame_data(sprd_context));
+    printf("Received version: %.*s\n", data_length, (char *) data);
 
-    ret = sprd_check_connection(sprd_context);
-    if (ret) {
-        printf("sprd_check_connection failed: %d\n", ret);
-        return ret;
+    ret = da_send_check(sprd_context->handle, CMD_EMMC_INIT, 0, NULL);
+    if (!ret) {
+        printf("da_send_check failed: %d\n", ret);
+        return -1;
     }
 
     return 0;
