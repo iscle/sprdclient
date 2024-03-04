@@ -6,8 +6,11 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <malloc.h>
 #include "sprd.h"
 #include "da.h"
+#include "endianness.h"
+#include "gpt.h"
 
 #define VENDOR_ID 0x1782
 #define PRODUCT_ID 0x4d00
@@ -459,7 +462,7 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    da_cmd_t cmd;
+    uint16_t cmd;
     uint16_t data_length;
     void *data;
     if (da_receive(sprd_context->handle, &cmd, &data_length, &data)) {
@@ -474,10 +477,59 @@ static int sprd_do_work(SprdContext *sprd_context) {
 
     printf("Received version: %.*s\n", data_length, (char *) data);
 
-    ret = da_send_check(sprd_context->handle, CMD_EMMC_INIT, 0, NULL);
-    if (!ret) {
-        printf("da_send_check failed: %d\n", ret);
+    ret = da_send(sprd_context->handle, CMD_EMMC_INIT, 0, NULL);
+    if (ret) {
+        printf("da_send failed: %d\n", ret);
         return -1;
+    }
+
+    if (da_check_status(sprd_context->handle)) {
+        printf("CMD_EMMC_INIT failed\n");
+        return -1;
+    }
+
+    uint8_t lba[4]; // big endian
+    WRITE_BE32(lba, PRIMARY_GPT_HEADER_LBA);
+    ret = da_send(sprd_context->handle, CMD_EMMC_READ_SINGLE_BLOCK, 4, lba);
+    if (ret) {
+        printf("da_send failed: %d\n", ret);
+        return -1;
+    }
+
+    ret = da_receive(sprd_context->handle, &cmd, &data_length, &data);
+    if (ret) {
+        printf("da_receive failed: %d\n", ret);
+        return -1;
+    }
+
+    switch (cmd) {
+        case CMD_STATUS:
+            printf("CMD_STATUS: %d\n", *(da_status_t *) data);
+            return -1;
+        case CMD_EMMC_READ_SINGLE_BLOCK:
+            printf("CMD_EMMC_READ_SINGLE_BLOCK ok! Received data length: %d\n", data_length);
+            gpt_header_t gpt_header;
+            memcpy(&gpt_header, data, sizeof(gpt_header_t));
+
+            // print sizeof(gpt_header_t) as hex from data ptr directly
+            for (int i = 0; i < sizeof(gpt_header_t); i++) {
+                printf("%02x ", ((uint8_t *) data)[i]);
+            }
+
+            printf("Signature: %.*s\n", 8, (char *) &gpt_header.signature);
+            printf("Revision: 0x%08x\n", gpt_header.revision);
+            printf("Header size: 0x%08x\n", gpt_header.header_size);
+            printf("Header CRC32: 0x%08x\n", gpt_header.header_crc32);
+            printf("MyLBA: 0x%08lx\n", gpt_header.my_lba);
+            printf("AlternateLBA: 0x%08lx\n", gpt_header.alternate_lba);
+            printf("FirstUsableLBA: 0x%08lx\n", gpt_header.first_usable_lba);
+            printf("LastUsableLBA: 0x%08lx\n", gpt_header.last_usable_lba);
+            printf("PartitionEntryLBA: 0x%08lx\n", gpt_header.partition_entry_lba);
+            printf("NumberOfPartitionEntries: 0x%08x\n", gpt_header.number_of_partition_entries);
+            printf("SizeOfPartitionEntry: 0x%08x\n", gpt_header.size_of_partition_entry);
+            printf("PartitionEntryArrayCRC32: 0x%08x\n", gpt_header.partition_entry_array_crc32);
+
+            break;
     }
 
     return 0;

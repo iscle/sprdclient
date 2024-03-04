@@ -10,20 +10,19 @@ typedef enum {
 
     // EMMC
     CMD_EMMC_INIT = 0x02,
-    CMD_EMMC_READ = 0x03,
-    CMD_EMMC_WRITE = 0x04,
+    CMD_EMMC_READ_SINGLE_BLOCK = 0x03,
 
     CMD_EXIT = 0xFF,
 } da_cmd_t;
 
 typedef enum {
-    STATUS_EMMC_INIT = 0x00,
-
-    STATUS_OK = 0xFE,
-    STATUS_ERROR = 0xFF,
+    STATUS_OK = 0x00,
+    STATUS_ERROR = 0x01,
 } da_status_t;
 
-int da_receive(libusb_device_handle *handle, da_cmd_t *cmd, uint16_t *data_length, void **data);
-int da_send_check(libusb_device_handle *handle, da_cmd_t cmd, uint16_t data_length, const void *data);
+int da_receive(libusb_device_handle *handle, uint16_t *cmd, uint16_t *data_length, void **data);
+int da_receive_status(libusb_device_handle *handle, da_status_t *status);
+int da_check_status(libusb_device_handle *handle);
+int da_send(libusb_device_handle *handle, uint16_t cmd, uint16_t data_length, const void *data);
 
 #endif //DA_H
