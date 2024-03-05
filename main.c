@@ -415,6 +415,80 @@ static int munmap_file(uint8_t *fileptr, ssize_t filesize) {
     return 0;
 }
 
+static bool is_guid_zero(const uint8_t *guid) {
+    for (int i = 0; i < 16; i++) {
+        if (guid[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void print_utf16(const uint16_t *buf) {
+    while (*buf) {
+        printf("%c", *buf);
+        buf++;
+    }
+}
+
+static uint64_t get_time() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * 1000 + (uint64_t) ts.tv_nsec / 1000000;
+}
+
+static void read_partition_to_file(libusb_device_handle *handle, gpt_entry_t *entry) {
+    // file name from entry ".img"
+    char filename[40];
+    int filename_length = 0;
+    for (int i = 0; i < 36; i++) {
+        if (entry->partition_name[i] == 0) {
+            break;
+        }
+        filename[filename_length++] = (char) entry->partition_name[i];
+    }
+    filename[filename_length++] = '.';
+    filename[filename_length++] = 'i';
+    filename[filename_length++] = 'm';
+    filename[filename_length++] = 'g';
+    filename[filename_length] = 0;
+
+    printf("Writing partition to %s...\n", filename);
+
+    int ret;
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        printf("open failed: %s\n", filename);
+        return;
+    }
+
+    uint8_t buffer[EMMC_BLOCK_SIZE];
+    uint32_t total_blocks = entry->ending_lba - entry->starting_lba + 1;
+    for (uint32_t i = 0; i < total_blocks; i++) {
+        uint64_t start_time = get_time();
+        ret = da_read_single_block(handle, entry->starting_lba + i, buffer);
+        if (ret) {
+            printf("da_read_single_block failed: %d\n", ret);
+            close(fd);
+            return;
+        }
+
+        ssize_t written = write(fd, buffer, EMMC_BLOCK_SIZE);
+        if (written != EMMC_BLOCK_SIZE) {
+            printf("write failed: %ld\n", written);
+            close(fd);
+            return;
+        }
+        uint64_t end_time = get_time();
+
+        // calculate also mb/s
+        printf("Read block %u/%u (%u%%) in %lu ms (%.2f MB/s)\n", i + 1, total_blocks, (i + 1) * 100 / total_blocks, end_time - start_time, ((double) EMMC_BLOCK_SIZE / (double) (end_time - start_time)) * 1000 / (1024 * 1024));
+    }
+
+    close(fd);
+    printf("Done\n");
+}
+
 static int sprd_do_work(SprdContext *sprd_context) {
     int ret;
 
@@ -477,59 +551,71 @@ static int sprd_do_work(SprdContext *sprd_context) {
 
     printf("Received version: %.*s\n", data_length, (char *) data);
 
-    ret = da_send(sprd_context->handle, CMD_EMMC_INIT, 0, NULL);
+    ret = da_emmc_init(sprd_context->handle);
     if (ret) {
-        printf("da_send failed: %d\n", ret);
+        printf("da_emmc_init failed: %d\n", ret);
         return -1;
     }
 
-    if (da_check_status(sprd_context->handle)) {
-        printf("CMD_EMMC_INIT failed\n");
-        return -1;
-    }
-
-    uint8_t lba[4]; // big endian
-    WRITE_BE32(lba, PRIMARY_GPT_HEADER_LBA);
-    ret = da_send(sprd_context->handle, CMD_EMMC_READ_SINGLE_BLOCK, 4, lba);
+    uint32_t sec_count;
+    ret = da_get_sec_count(sprd_context->handle, &sec_count);
     if (ret) {
-        printf("da_send failed: %d\n", ret);
+        printf("da_get_sec_count failed: %d\n", ret);
         return -1;
     }
 
-    ret = da_receive(sprd_context->handle, &cmd, &data_length, &data);
+    printf("emmc sector count: %u\n", sec_count);
+
+    uint8_t blk_buf[EMMC_BLOCK_SIZE];
+    ret = da_read_single_block(sprd_context->handle, 1, blk_buf);
     if (ret) {
-        printf("da_receive failed: %d\n", ret);
+        printf("da_read_single_block failed: %d\n", ret);
         return -1;
     }
 
-    switch (cmd) {
-        case CMD_STATUS:
-            printf("CMD_STATUS: %d\n", *(da_status_t *) data);
+    gpt_header_t gpt_header;
+    memcpy(&gpt_header, blk_buf, sizeof(gpt_header_t));
+    if (gpt_header.signature != GPT_HEADER_SIGNATURE) {
+        printf("Invalid GPT header signature: 0x%08lx\n", gpt_header.signature);
+        return -1;
+    }
+
+    printf("GPT header:\n");
+    printf("  Header size: %u\n", gpt_header.header_size);
+    printf("  MyLBA: %lu\n", gpt_header.my_lba);
+    printf("  AlternateLBA: %lu\n", gpt_header.alternate_lba);
+    printf("  FirstUsableLBA: %lu\n", gpt_header.first_usable_lba);
+    printf("  LastUsableLBA: %lu\n", gpt_header.last_usable_lba);
+    printf("  PartitionEntryLBA: %lu\n", gpt_header.partition_entry_lba);
+    printf("  NumberOfPartitionEntries: %u\n", gpt_header.number_of_partition_entries);
+    printf("  SizeOfPartitionEntry: %u\n", gpt_header.size_of_partition_entry);
+
+    uint32_t partition_entries_per_block = EMMC_BLOCK_SIZE / gpt_header.size_of_partition_entry;
+    uint32_t partition_entries_blocks = gpt_header.number_of_partition_entries / partition_entries_per_block;
+    for (uint32_t i = 0; i < partition_entries_blocks; i++) {
+        uint32_t lba = gpt_header.partition_entry_lba + i;
+        ret = da_read_single_block(sprd_context->handle, lba, blk_buf);
+        if (ret) {
+            printf("da_read_single_block failed: %d\n", ret);
             return -1;
-        case CMD_EMMC_READ_SINGLE_BLOCK:
-            printf("CMD_EMMC_READ_SINGLE_BLOCK ok! Received data length: %d\n", data_length);
-            gpt_header_t gpt_header;
-            memcpy(&gpt_header, data, sizeof(gpt_header_t));
+        }
 
-            // print sizeof(gpt_header_t) as hex from data ptr directly
-            for (int i = 0; i < sizeof(gpt_header_t); i++) {
-                printf("%02x ", ((uint8_t *) data)[i]);
+        gpt_entry_t gpt_entry;
+        for (uint32_t j = 0; j < partition_entries_per_block; j++) {
+            memcpy(&gpt_entry, blk_buf + j * gpt_header.size_of_partition_entry, sizeof(gpt_entry_t));
+            if (is_guid_zero(gpt_entry.partition_type_guid)) {
+                continue;
             }
 
-            printf("Signature: %.*s\n", 8, (char *) &gpt_header.signature);
-            printf("Revision: 0x%08x\n", gpt_header.revision);
-            printf("Header size: 0x%08x\n", gpt_header.header_size);
-            printf("Header CRC32: 0x%08x\n", gpt_header.header_crc32);
-            printf("MyLBA: 0x%08lx\n", gpt_header.my_lba);
-            printf("AlternateLBA: 0x%08lx\n", gpt_header.alternate_lba);
-            printf("FirstUsableLBA: 0x%08lx\n", gpt_header.first_usable_lba);
-            printf("LastUsableLBA: 0x%08lx\n", gpt_header.last_usable_lba);
-            printf("PartitionEntryLBA: 0x%08lx\n", gpt_header.partition_entry_lba);
-            printf("NumberOfPartitionEntries: 0x%08x\n", gpt_header.number_of_partition_entries);
-            printf("SizeOfPartitionEntry: 0x%08x\n", gpt_header.size_of_partition_entry);
-            printf("PartitionEntryArrayCRC32: 0x%08x\n", gpt_header.partition_entry_array_crc32);
+            printf("Partition entry %u:\n", i + j);
+            printf("  StartingLBA: %lu\n", gpt_entry.starting_lba);
+            printf("  EndingLBA: %lu\n", gpt_entry.ending_lba);
+            printf("  PartitionName: ");
+            print_utf16(gpt_entry.partition_name);
+            printf("\n");
 
-            break;
+            read_partition_to_file(sprd_context->handle, &gpt_entry);
+        }
     }
 
     return 0;

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define PRIMARY_GPT_HEADER_LBA  1
+#define GPT_HEADER_SIGNATURE    0x5452415020494645
 
 typedef struct {
     uint64_t signature;
