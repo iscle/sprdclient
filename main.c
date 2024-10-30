@@ -370,12 +370,40 @@ static int sprd_execute_payload(SprdContext *sprd_context, uint32_t load_address
         return ret;
     }
 
-    printf("Sending BSL_CMD_EXEC_DATA...\n");
-    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_EXEC_DATA, 0, NULL);
+    printf("Sending BSL_CMD_START_DATA...\n");
+    uint32_t stack_lr = 0x3f58;
+    uint32_t address_size = 8;
+    buffer[0] = (stack_lr >> 24) & 0xff;
+    buffer[1] = (stack_lr >> 16) & 0xff;
+    buffer[2] = (stack_lr >> 8) & 0xff;
+    buffer[3] = stack_lr & 0xff;
+    buffer[4] = (address_size >> 24) & 0xff;
+    buffer[5] = (address_size >> 16) & 0xff;
+    buffer[6] = (address_size >> 8) & 0xff;
+    buffer[7] = address_size & 0xff;
+    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_START_DATA, 8, buffer);
     if (ret) {
         printf("sprd_send_and_check_frame failed: %d\n", ret);
         return ret;
     }
+
+    printf("Sending BSL_CMD_MIDST_DATA...\n");
+    uint32_t fixed_address = load_address + 0x200;
+    buffer[0] = fixed_address & 0xff;
+    buffer[1] = (fixed_address >> 8) & 0xff;
+    buffer[2] = (fixed_address >> 16) & 0xff;
+    buffer[3] = (fixed_address >> 24) & 0xff;
+    buffer[4] = 0;
+    buffer[5] = 0;
+    buffer[6] = 0;
+    buffer[7] = 0;
+    ret = sprd_send_and_check_frame(sprd_context, BSL_CMD_MIDST_DATA, 8, buffer);
+    if (ret) {
+        printf("sprd_send_and_check_frame failed: %d\n", ret);
+        return ret;
+    }
+
+    printf("Jumped to payload successfully!\n");
 
     return 0;
 }
@@ -515,7 +543,7 @@ static int sprd_do_work(SprdContext *sprd_context) {
 
     printf("Starting fdl1 execution...\n");
 
-    char *filename = "/home/iscle/Documents/sprd_test/app_with_gap.bin";
+    char *filename = "/home/iscle/Documents/sprd/blunlock/sprd_test/app_with_gap.bin";
     uint8_t *payload;
     ssize_t payload_size;
     ret = mmap_file(filename, &payload, &payload_size);
@@ -524,7 +552,7 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    ret = sprd_execute_payload(sprd_context, 0x00005500, payload, payload_size);
+    ret = sprd_execute_payload(sprd_context, 0x5500, payload, payload_size);
     if (ret) {
         printf("sprd_execute_payload failed: %d\n", ret);
         return ret;
