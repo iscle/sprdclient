@@ -552,7 +552,7 @@ static int sprd_do_work(SprdContext *sprd_context) {
         return ret;
     }
 
-    ret = sprd_execute_payload(sprd_context, 0x5500, payload, payload_size);
+    ret = sprd_execute_payload(sprd_context, 0x00005500, payload, payload_size);
     if (ret) {
         printf("sprd_execute_payload failed: %d\n", ret);
         return ret;

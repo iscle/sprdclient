@@ -225,3 +225,183 @@ int da_read_single_block(libusb_device_handle *handle, uint32_t lba, void *data)
     memcpy(data, received_data, EMMC_BLOCK_SIZE);
     return 0;
 }
+
+int da_write_block(libusb_device_handle *handle, uint32_t lba, const void *data) {
+    uint8_t buf[4 + EMMC_BLOCK_SIZE];
+    WRITE_BE32(buf, lba);
+    memcpy(buf + 4, data, EMMC_BLOCK_SIZE);
+    int ret = da_send(handle, CMD_EMMC_WRITE_BLOCK, 4 + EMMC_BLOCK_SIZE, buf);
+    if (ret) {
+        return ret;
+    }
+
+    return da_check_status(handle);
+}
+
+int da_read_reg8(libusb_device_handle *handle, uint64_t addr, uint8_t *val) {
+    uint8_t buf[8];
+    WRITE_BE64(buf, addr);
+    int ret = da_send(handle, CMD_READ_REG8, 8, buf);
+    if (ret) {
+        return ret;
+    }
+
+    uint16_t cmd;
+    uint16_t data_length;
+    void *data;
+    ret = da_receive(handle, &cmd, &data_length, &data);
+    if (ret) {
+        return ret;
+    }
+
+    if (cmd != CMD_READ_REG8) {
+        printf("cmd != CMD_READ_REG8\n");
+        return -1;
+    }
+
+    if (data_length != 1) {
+        printf("data_length != 1\n");
+        return -1;
+    }
+
+    *val = ((uint8_t *) data)[0];
+    return 0;
+}
+
+int da_write_reg8(libusb_device_handle *handle, uint64_t addr, uint8_t val) {
+    uint8_t buf[9];
+    WRITE_BE64(buf, addr);
+    buf[8] = val;
+    int ret = da_send(handle, CMD_WRITE_REG8, 9, buf);
+    if (ret) {
+        return ret;
+    }
+
+    return da_check_status(handle);
+}
+
+int da_read_reg16(libusb_device_handle *handle, uint64_t addr, uint16_t *val) {
+    uint8_t buf[8];
+    WRITE_BE64(buf, addr);
+    int ret = da_send(handle, CMD_READ_REG16, 8, buf);
+    if (ret) {
+        return ret;
+    }
+
+    uint16_t cmd;
+    uint16_t data_length;
+    void *data;
+    ret = da_receive(handle, &cmd, &data_length, &data);
+    if (ret) {
+        return ret;
+    }
+
+    if (cmd != CMD_READ_REG16) {
+        printf("cmd != CMD_READ_REG16\n");
+        return -1;
+    }
+
+    if (data_length != 2) {
+        printf("data_length != 2\n");
+        return -1;
+    }
+
+    *val = READ_BE16(data);
+    return 0;
+}
+
+int da_write_reg16(libusb_device_handle *handle, uint64_t addr, uint16_t val) {
+    uint8_t buf[10];
+    WRITE_BE64(buf, addr);
+    WRITE_BE16(buf + 8, val);
+    int ret = da_send(handle, CMD_WRITE_REG16, 10, buf);
+    if (ret) {
+        return ret;
+    }
+
+    return da_check_status(handle);
+}
+
+int da_read_reg32(libusb_device_handle *handle, uint64_t addr, uint32_t *val) {
+    uint8_t buf[8];
+    WRITE_BE64(buf, addr);
+    int ret = da_send(handle, CMD_READ_REG32, 8, buf);
+    if (ret) {
+        return ret;
+    }
+
+    uint16_t cmd;
+    uint16_t data_length;
+    void *data;
+    ret = da_receive(handle, &cmd, &data_length, &data);
+    if (ret) {
+        return ret;
+    }
+
+    if (cmd != CMD_READ_REG32) {
+        printf("cmd != CMD_READ_REG32\n");
+        return -1;
+    }
+
+    if (data_length != 4) {
+        printf("data_length != 4\n");
+        return -1;
+    }
+
+    *val = READ_BE32(data);
+    return 0;
+}
+
+int da_write_reg32(libusb_device_handle *handle, uint64_t addr, uint32_t val) {
+    uint8_t buf[12];
+    WRITE_BE64(buf, addr);
+    WRITE_BE32(buf + 8, val);
+    int ret = da_send(handle, CMD_WRITE_REG32, 12, buf);
+    if (ret) {
+        return ret;
+    }
+
+    return da_check_status(handle);
+}
+
+int da_read_reg64(libusb_device_handle *handle, uint64_t addr, uint64_t *val) {
+    uint8_t buf[8];
+    WRITE_BE64(buf, addr);
+    int ret = da_send(handle, CMD_READ_REG64, 8, buf);
+    if (ret) {
+        return ret;
+    }
+
+    uint16_t cmd;
+    uint16_t data_length;
+    void *data;
+    ret = da_receive(handle, &cmd, &data_length, &data);
+    if (ret) {
+        return ret;
+    }
+
+    if (cmd != CMD_READ_REG64) {
+        printf("cmd != CMD_READ_REG64\n");
+        return -1;
+    }
+
+    if (data_length != 8) {
+        printf("data_length != 8\n");
+        return -1;
+    }
+
+    *val = READ_BE64(data);
+    return 0;
+}
+
+int da_write_reg64(libusb_device_handle *handle, uint64_t addr, uint64_t val) {
+    uint8_t buf[16];
+    WRITE_BE64(buf, addr);
+    WRITE_BE64(buf + 8, val);
+    int ret = da_send(handle, CMD_WRITE_REG64, 16, buf);
+    if (ret) {
+        return ret;
+    }
+
+    return da_check_status(handle);
+}
