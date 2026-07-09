@@ -611,7 +611,9 @@ static int sprd_do_work(SprdContext *sprd_context) {
             printf("  StartingLBA: %lu\n", gpt_entry.starting_lba);
             printf("  EndingLBA: %lu\n", gpt_entry.ending_lba);
             printf("  PartitionName: ");
-            print_utf16(gpt_entry.partition_name);
+            uint16_t name_buffer[36];
+            memcpy(name_buffer, gpt_entry.partition_name, sizeof(name_buffer));
+            print_utf16(name_buffer);
             printf("\n");
 
             read_partition_to_file(sprd_context->handle, &gpt_entry);
